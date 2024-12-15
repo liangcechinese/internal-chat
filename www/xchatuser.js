@@ -17,13 +17,15 @@ class XChatUser {
   onicecandidate = () => { };
   onmessage = () => { };
   onReviceFile = () => { };
+  onFileProgress = () => { };
 
-
+  // 文件接收相关
+  fileWriter = null;      // 新增：用于写入文件的 StreamSaver
   receivedSize = 0;
-  receivedChunks = [];
   fileInfo = null;
-
-  
+  tempBlob = null;       // 新增：临时存储小块数据
+  tempChunks = [];       // 新增：临时块存储
+  TEMP_CHUNK_SIZE = 1024 * 1024; // 1MB临时块大小
 
   async createConnection() {
     this.rtcConn = new RTCPeerConnection({ iceServers: [] });
@@ -115,39 +117,51 @@ class XChatUser {
 
   dataChannel_initEvent() {
     // 接收消息
-    this.chatChannel.onmessage = e => {
+    this.chatChannel.onmessage = async e => {
       const message = e.data;
       if (typeof message === 'string') {
         if (message.startsWith('##FILE_S##')) {
-          // 文件传输前的头信息
-          this.receivedChunks = [];
+          // 文件传输开始
           this.receivedSize = 0;
+          this.tempChunks = [];
+          this.tempBlob = null;
           this.fileInfo = JSON.parse(message.substring(10));
+          
+          // 创建临时blob用于url生成
+          this.tempBlob = new Blob([], { type: 'application/octet-stream' });
         } else if (message === '##FILE_E##') {
+          // 文件传输结束
+          if (this.tempChunks.length > 0) {
+            const finalBlob = new Blob(this.tempChunks, { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(finalBlob);
+            this.onReviceFile({ url, name: this.fileInfo.name });
+          }
+          // 清理资源
+          this.tempChunks = [];
+          this.tempBlob = null;
+          this.fileInfo = null;
+          this.receivedSize = 0;
         } else {
           this.onmessage(message);
         }
-      } else if (this.receivedChunks) {
-        if (message instanceof ArrayBuffer) {
-          this.receivedChunks.push(message);
-        } else if (message instanceof Uint8Array) {
-          this.receivedChunks.push(message.buffer);
-        } else {
-          console.error('unknow message type', message);
-        }
-        this.receivedSize += message.byteLength;
-        console.log(this.fileInfo.size, this.receivedSize, `${Math.floor(this.receivedSize / this.fileInfo.size * 100)}%`);
-        if (this.fileInfo.size === this.receivedSize) {
-          // 文件传输结束的尾信息
-          // console.log(this.receivedChunks);
-          let blob = new Blob(this.receivedChunks);
-          let url = URL.createObjectURL(blob);
-          console.log('finish recive');
-          this.onReviceFile({  url, name: this.fileInfo.name });
-          blob = null;
-          this.receivedChunks = null;
-          this.receivedSize = 0;
-          this.fileInfo = null;
+      } else if (this.fileInfo) {
+        // 处理文件数据
+        if (message instanceof ArrayBuffer || message instanceof Uint8Array) {
+          const chunk = message instanceof Uint8Array ? message.buffer : message;
+          this.receivedSize += chunk.byteLength;
+          
+          // 将数据添加到临时chunks
+          this.tempChunks.push(chunk);
+          
+          // 如果临时chunks累积超过阈值，创建blob并释放内存
+          if (this.getTempChunksSize() > this.TEMP_CHUNK_SIZE) {
+            const tempBlob = new Blob(this.tempChunks, { type: 'application/octet-stream' });
+            this.tempChunks = [tempBlob]; // 只保留合并后的blob
+          }
+          
+          // 触发进度回调
+          const progress = Math.floor(this.receivedSize / this.fileInfo.size * 100);
+          this.onFileProgress(progress, this.fileInfo);
         }
       }
     };
@@ -155,77 +169,88 @@ class XChatUser {
     this.chatChannel.onopen = () => console.log('chatChannel is open');
     this.chatChannel.onclose = () => console.log('DataChannel is closed');
   }
-  checkBufferedAmount() {
-    const maxBufferedAmount = 1024 * 128; // 设置最大缓冲区限制（例如 256KB）
-    if (this.chatChannel.bufferedAmount >= maxBufferedAmount) {
-      // console.log('Data channel is full, waiting...');
-      // 如果缓冲区满了，暂停发送
-      return false;
-    } else {
-      // 缓冲区未满，可以继续发送
-      return true;
-    }
+
+  // 新增：获取临时chunks的总大小
+  getTempChunksSize() {
+    return this.tempChunks.reduce((total, chunk) => {
+      return total + (chunk instanceof Blob ? chunk.size : chunk.byteLength);
+    }, 0);
   }
-  sendFileBytes(file) {
-    return new Promise((resolve, reject) => {
-      const chunkSize = 16 * 1024; // 每次发送 32KB
-      const totalChunks = Math.ceil(file.size / chunkSize);
-      let currentChunk = 0;
 
-      const fileReader = new FileReader();
-      
-      // 文件读取完成后的处理
-      fileReader.onload = async () => {
-        // `fileReader.result` 包含当前块的数据
-        try {
-
-          while(!this.checkBufferedAmount()) {
-            await new Promise((resolve, reject) => {
-              setTimeout(() => {
-                resolve();
-              }, 100);
-            });
-          }
-          this.chatChannel.send(fileReader.result); // 发送数据
-        } catch (e) {
-          console.error(e);
-          reject();
-        }
-        console.log(`${currentChunk + 1}/${totalChunks}(${Math.floor((currentChunk + 1) / totalChunks * 100)}%)`);
-        currentChunk++;
-
-        // 如果还有下一个块，继续发送
-        if (currentChunk < totalChunks) {
-          sendNextChunk();
-        } else {
-          console.log('File sent successfully.');
-          resolve();
-        }
-      };
-
-      function sendNextChunk() {
-        const start = currentChunk * chunkSize;
-        const end = Math.min(start + chunkSize, file.size);
-        try {
-          const chunk = file.slice(start, end);
-          fileReader.readAsArrayBuffer(chunk); // 读取当前块
-        } catch (e) {
-          console.error(e);
-          reject();
-        }
-      }
-
-      sendNextChunk(); // 开始发送
-    });
+  checkBufferedAmount() {
+    const maxBufferedAmount = 1024 * 256; // 增加到 256KB
+    return this.chatChannel.bufferedAmount < maxBufferedAmount;
   }
 
   async sendFile(fileInfo, file) {
-    const fileInfoStr = '##FILE_S##' + JSON.stringify(fileInfo);
-    await this.sendMessage(fileInfoStr);
-    await this.sendFileBytes(file);
-    await this.sendMessage('##FILE_E##');
+    try {
+      const fileInfoStr = '##FILE_S##' + JSON.stringify(fileInfo);
+      await this.sendMessage(fileInfoStr);
+      await this.sendFileBytes(file);
+      await this.sendMessage('##FILE_E##');
+      return true;
+    } catch (error) {
+      console.error('Error sending file:', error);
+      throw error;
+    }
   }
-  
+
+  async sendFileBytes(file) {
+    return new Promise((resolve, reject) => {
+      const chunkSize = 32 * 1024; // 32KB chunks
+      const totalChunks = Math.ceil(file.size / chunkSize);
+      let currentChunk = 0;
+      let aborted = false;
+
+      const fileReader = new FileReader();
+      
+      fileReader.onload = async () => {
+        try {
+          while(!this.checkBufferedAmount() && !aborted) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+          
+          if (aborted) {
+            return;
+          }
+
+          this.chatChannel.send(fileReader.result);
+          currentChunk++;
+          
+          // 计算并触发进度回调
+          const progress = Math.floor((currentChunk / totalChunks) * 100);
+          this.onFileProgress(progress, { name: file.name, size: file.size });
+
+          if (currentChunk < totalChunks) {
+            sendNextChunk();
+          } else {
+            console.log('File sent successfully.');
+            resolve();
+          }
+        } catch (e) {
+          console.error('Error sending file chunk:', e);
+          aborted = true;
+          reject(e);
+        }
+      };
+
+      fileReader.onerror = () => {
+        console.error('Error reading file chunk');
+        aborted = true;
+        reject(new Error('File read error'));
+      };
+
+      const sendNextChunk = () => {
+        const start = currentChunk * chunkSize;
+        const end = Math.min(start + chunkSize, file.size);
+        const chunk = file.slice(start, end);
+        fileReader.readAsArrayBuffer(chunk);
+      };
+
+      sendNextChunk();
+    });
+  }
+
   async sendMessage(message) {
     if (!this.chatChannel) {
       console.log(this.id, '------chatChannel is null');

@@ -43,15 +43,66 @@ function sendMessage(msg) {
 
 async function sendFile(file) {
   const fileInfo = { name: file.name, size: file.size };
+  const progressId = `progress-${me.id}-${file.name}-${Date.now()}`; // 添加时间戳避免重名
+  
+  // 创建进度条
+  const chatBox = document.querySelector('.chat-wrapper');
+  const progressItem = document.createElement('div');
+  progressItem.className = 'chat-item';
+  progressItem.innerHTML = `
+    <div class="chat-item_user">${me.id}（我）:</div>
+    <div class="chat-item_content">
+      <div>[文件上传] ${file.name} (${formatFileSize(file.size)})</div>
+      <div class="progress-bar-container">
+        <div id="${progressId}" class="progress-bar" style="width: 0%"></div>
+      </div>
+      <div class="progress-text">准备上传...</div>
+    </div>
+  `;
+  chatBox.appendChild(progressItem);
+  chatBox.scrollTop = chatBox.scrollHeight;
+
   for (const u of users) {
     if (u.isMe) {
       continue;
     }
-    await u.sendFile(fileInfo, file);
-  }
 
-  addChatItem(me.id, `[文件] ${fileInfo.name}`);
+    const progressBar = document.getElementById(progressId);
+    const progressText = progressBar.parentElement.nextElementSibling;
+
+    // 添加进度回调
+    u.onFileProgress = (progress, info) => {
+      if (progressBar) {
+        progressBar.style.width = `${progress}%`;
+        progressText.textContent = `上传中... ${progress}%`;
+      }
+    };
+
+    try {
+      await u.sendFile(fileInfo, file);
+      if (progressBar) {
+        progressBar.style.backgroundColor = '#4CAF50';
+        progressText.textContent = '传输完成';
+      }
+    } catch (error) {
+      console.error('File transfer error:', error);
+      if (progressBar) {
+        progressBar.style.backgroundColor = '#f44336';
+        progressText.textContent = '传输失败';
+      }
+    }
+  }
 }
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+}
+
 function registCandidate() {
   for (const ca of JSON.parse(candidate.value)) {
     me.addIceCandidate(ca);
@@ -162,7 +213,6 @@ signalingServer.onopen = () => {
 signalingServer.onmessage = ({ data: responseStr }) => {
   const response = JSON.parse(responseStr);
   const { type, data } = response;
-
 
   if (type === '1001') {
     me.id = data.id;

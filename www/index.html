@@ -39,7 +39,13 @@
   <div class="left">
     <div class="chat-wrapper">
     </div>
-    <textarea id="messageInput" class="txt-msg" onkeydown="enterTxt(event)"></textarea>
+    <div class="input-container">
+      <textarea 
+        id="messageInput" 
+        class="txt-msg" 
+        onkeydown="enterTxt(event)"
+        placeholder="输入消息按回车发送，或直接拖拽文件到窗口传输"></textarea>
+    </div>
   </div>
   <div class="right">
     <ul id="users">
