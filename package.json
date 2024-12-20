@@ -1,0 +1,12 @@
+{
+  "name": "p2p-chat",
+  "version": "1.0.0",
+  "description": "P2P Chat Application",
+  "main": "index.js",
+  "scripts": {
+    "start": "http-server ./www"
+  },
+  "dependencies": {
+    "http-server": "^14.1.1"
+  }
+}
